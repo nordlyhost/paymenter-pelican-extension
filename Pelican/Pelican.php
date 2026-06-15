@@ -316,11 +316,21 @@ class Pelican extends Server
             throw new \Exception('Port array must be an array');
         }
 
-        $nodes = $this->request('/api/application/nodes/deployable', 'get', [
-            'memory' => $settings['memory'],
-            'disk' => $settings['disk'],
+        // Pelican beta34: /api/application/nodes/deployable does not include
+        // allocations in its response. Use /api/application/nodes with
+        // ?include=allocations and filter capacity manually via allocated_resources.
+        $nodes = $this->request('/api/application/nodes', 'get', [
+            'include' => 'allocations',
         ]);
-        $nodes = collect($nodes['data']);
+        $nodes = collect($nodes['data'])->filter(function ($node) use ($settings) {
+            $attrs = $node['attributes'];
+            $memoryCap = $attrs['memory'] * (1 + ($attrs['memory_overallocate'] ?? 0) / 100);
+            $diskCap = $attrs['disk'] * (1 + ($attrs['disk_overallocate'] ?? 0) / 100);
+            $memoryUsed = $attrs['allocated_resources']['memory'] ?? 0;
+            $diskUsed = $attrs['allocated_resources']['disk'] ?? 0;
+            return ($memoryCap - $memoryUsed) >= (int) $settings['memory']
+                && ($diskCap - $diskUsed) >= (int) $settings['disk'];
+        })->values();
         $nodes_by_id = $nodes->mapWithKeys(fn ($node) => [$node['attributes']['id'] => $node['attributes']]);
 
         if ($settings['node']) {
