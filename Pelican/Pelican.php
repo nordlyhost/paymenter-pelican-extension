@@ -182,6 +182,15 @@ class Pelican extends Server
                 'required' => false,
                 'disabled' => $using_port_array,
             ],
+			[
+				'name' => 'deploy_tags',
+				'label' => 'Deploy Tags',
+				'type' => 'tags',
+				'description' => 'Tags identifying which Pelican nodes this product can deploy to. Must match tags set on nodes in Pelican admin. Leave empty to deploy to any deployable node. Only used when Port Array is empty (auto-deploy mode).',
+				'database_type' => 'array',
+				'required' => false,
+				'disabled' => $using_port_array,
+			],
             [
                 'name' => 'skip_scripts',
                 'label' => 'Skip Egg Install Script',
@@ -274,15 +283,17 @@ class Pelican extends Server
             'start_on_completion' => $settings['start_on_completion'] ?? false,
         ];
         if ($deploymentData['auto_deploy']) {
-            $serverCreationData['deploy'] = [
-                'locations' => [$settings['node']] ?? [],
-                'dedicated_ip' => $settings['dedicated_ip'] ?? false,
-                'port_range' => $settings['port_range'] ?? [],
-                'tags' => ['PaymenterDeployment'],
-            ];
-        } else {
-            $serverCreationData['allocation'] = $deploymentData['allocation'];
-        }
+			// Pelican beta34 removed Locations data model. Auto-deployment now uses
+			// node tags (set in Pelican admin per node). The deploy_tags product
+			// setting determines which nodes are eligible. Empty = any deployable node.
+			$serverCreationData['deploy'] = [
+				'tags' => $settings['deploy_tags'] ?? [],
+				'dedicated_ip' => $settings['dedicated_ip'] ?? false,
+				'port_range' => $settings['port_range'] ?? [],
+			];
+		} else {
+			$serverCreationData['allocation'] = $deploymentData['allocation'];
+		}
 
         $server = $this->request('/api/application/servers', 'post', $serverCreationData);
 
