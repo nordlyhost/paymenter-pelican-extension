@@ -277,23 +277,18 @@ class Pelican extends Server
                 'allocations' => $deploymentData['allocations_needed'] + $settings['additional_allocations'],
                 'backups' => $settings['backups'],
             ],
-            'allocation' => [
-                'default' => $deploymentData['allocations_needed'] + $settings['additional_allocations'],
-            ],
             'start_on_completion' => $settings['start_on_completion'] ?? false,
         ];
+        // Pelican beta34 workaround: deploy.tags silently fails to assign an allocation.
+        // generateDeploymentData() now picks an allocation ID directly; we send it via
+        // allocation.default for both auto and manual deployment paths.
         if ($deploymentData['auto_deploy']) {
-			// Pelican beta34 removed Locations data model. Auto-deployment now uses
-			// node tags (set in Pelican admin per node). The deploy_tags product
-			// setting determines which nodes are eligible. Empty = any deployable node.
-			$serverCreationData['deploy'] = [
-				'tags' => $settings['deploy_tags'] ?? [],
-				'dedicated_ip' => $settings['dedicated_ip'] ?? false,
-				'port_range' => $settings['port_range'] ?? [],
-			];
-		} else {
-			$serverCreationData['allocation'] = $deploymentData['allocation'];
-		}
+            $serverCreationData['allocation'] = [
+                'default' => $deploymentData['allocation_id'],
+            ];
+        } else {
+            $serverCreationData['allocation'] = $deploymentData['allocation'];
+        }
 
         $server = $this->request('/api/application/servers', 'post', $serverCreationData);
 
@@ -306,10 +301,62 @@ class Pelican extends Server
     private function generateDeploymentData($settings, $environment)
     {
         if (!isset($settings['port_array']) || $settings['port_array'] === '') {
+            // Pelican beta34: deploy.tags silently fails to assign an allocation
+            // (returns 200 OK with allocation:null, creating orphan servers Wings
+            // can't init). Workaround: pick an allocation ourselves from
+            // tag-matching nodes and send explicit allocation.default to Pelican
+            // instead of using deploy.tags.
+            $nodes = $this->request('/api/application/nodes', 'get', [
+                'include' => 'allocations',
+            ]);
+
+            $tags = $settings['deploy_tags'] ?? [];
+            if (!is_array($tags)) {
+                $tags = [];
+            }
+
+            $candidateNodes = collect($nodes['data'])->filter(function ($node) use ($settings, $tags) {
+                $attrs = $node['attributes'];
+                // Tag match: if tags specified, node must have at least one matching tag
+                if (!empty($tags)) {
+                    $nodeTags = $attrs['tags'] ?? [];
+                    if (empty(array_intersect($tags, $nodeTags))) {
+                        return false;
+                    }
+                }
+                // Capacity check
+                $memoryCap = $attrs['memory'] * (1 + ($attrs['memory_overallocate'] ?? 0) / 100);
+                $diskCap = $attrs['disk'] * (1 + ($attrs['disk_overallocate'] ?? 0) / 100);
+                $memoryUsed = $attrs['allocated_resources']['memory'] ?? 0;
+                $diskUsed = $attrs['allocated_resources']['disk'] ?? 0;
+                return ($memoryCap - $memoryUsed) >= (int) $settings['memory']
+                    && ($diskCap - $diskUsed) >= (int) $settings['disk'];
+            })->values();
+
+            if ($candidateNodes->isEmpty()) {
+                throw new \Exception('No nodes available for deployment (tags=[' . implode(',', $tags) . '], required memory=' . $settings['memory'] . 'MB, disk=' . $settings['disk'] . 'MB).');
+            }
+
+            // Pick first free allocation from first matching node
+            $allocationId = null;
+            foreach ($candidateNodes as $node) {
+                $allocations = collect($node['attributes']['relationships']['allocations']['data']);
+                $freeAllocation = $allocations->first(fn ($alloc) => !$alloc['attributes']['assigned']);
+                if ($freeAllocation) {
+                    $allocationId = $freeAllocation['attributes']['id'];
+                    break;
+                }
+            }
+
+            if ($allocationId === null) {
+                throw new \Exception('No free allocations found on tag-matching nodes.');
+            }
+
             return [
                 'auto_deploy' => true,
                 'environment' => $environment,
                 'allocations_needed' => 1,
+                'allocation_id' => $allocationId,
             ];
         }
 
